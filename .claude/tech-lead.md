@@ -11,25 +11,54 @@ Make architecture decisions, choose technologies, and ensure the codebase remain
 3. **Modular Integrations** - Data sources and removal services should be pluggable
 4. **Family-Scale** - Optimize for small groups (2-10 people), not enterprise scale
 
-## Recommended Stack (To Be Finalized)
+## Finalized Stack
 
-### Option A: Desktop App (Electron/Tauri)
-- Local-first data storage
-- Cross-platform (Windows, Mac, Linux)
-- Direct Incogni API integration
-- SQLite for local database
+### Backend (Python)
+- **FastAPI** - Modern async REST API framework with auto-generated OpenAPI docs
+- **SQLAlchemy 2.0** - ORM with async support
+- **Alembic** - Database migrations
+- **Celery** - Distributed task queue for background jobs
+- **Pydantic v2** - Data validation and serialization
 
-### Option B: Web App with Backend
-- Next.js or similar for frontend
-- Node.js/Python backend
-- PostgreSQL database
-- Hosted or self-hosted deployment
+### Frontend (Next.js)
+- **Next.js 14+** - React framework with App Router
+- **TypeScript** - Strict type checking enabled
+- **Tailwind CSS** - Utility-first CSS
+- **shadcn/ui** - Accessible, customizable components
+- **TanStack Query** - Server state management
 
-### Option C: CLI Tool
-- Lightweight, scriptable
-- Node.js or Python
-- JSON/SQLite local storage
-- Cron-based scheduling
+### Database & Caching
+- **PostgreSQL 16** - Primary relational database
+- **Redis 7** - Celery broker, caching, rate limiting
+
+### Infrastructure (Self-Hosted Docker)
+- **Docker Compose** - Multi-container orchestration
+- **Traefik** - Reverse proxy with automatic Let's Encrypt SSL
+- **Watchtower** (optional) - Automatic container updates
+
+### Project Structure
+```
+fibertap/
+├── backend/           # FastAPI application
+│   ├── app/
+│   │   ├── api/       # Route handlers
+│   │   ├── core/      # Config, security, database
+│   │   ├── models/    # SQLAlchemy models
+│   │   ├── schemas/   # Pydantic schemas
+│   │   ├── services/  # Business logic
+│   │   └── tasks/     # Celery background tasks
+│   ├── tests/
+│   └── alembic/       # Migrations
+├── frontend/          # Next.js application
+│   ├── src/
+│   │   ├── app/       # App Router pages
+│   │   ├── components/
+│   │   └── lib/       # Utilities, API client
+│   └── public/
+├── docker/            # Dockerfiles
+├── docker-compose.yml
+└── traefik/           # Traefik config
+```
 
 ## Key Technical Decisions
 

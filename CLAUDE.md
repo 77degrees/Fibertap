@@ -12,15 +12,63 @@ Fibertap is a personal/family data privacy monitoring tool that:
 
 ## Technology Stack
 
-*To be determined* - This is a new project. When the stack is chosen, update this section with:
-- Build commands
-- Test commands
-- Lint commands
-- Development server commands
+### Backend (Python)
+- **FastAPI** - Async REST API framework
+- **SQLAlchemy** - ORM
+- **Celery + Redis** - Background job processing
+- **Pydantic** - Data validation
+
+### Frontend (Next.js)
+- **Next.js 14+** - React framework with App Router
+- **TypeScript** - Type safety
+- **Tailwind CSS** - Styling
+- **shadcn/ui** - Component library
+
+### Database
+- **PostgreSQL** - Primary data store
+- **Redis** - Job queue and caching
+
+### Infrastructure
+- **Docker Compose** - Container orchestration
+- **Traefik** - Reverse proxy with auto SSL
+
+## Development Commands
+
+```bash
+# Start all services
+docker compose up -d
+
+# Backend (from /backend)
+cd backend
+python -m venv venv && source venv/bin/activate  # or venv\Scripts\activate on Windows
+pip install -r requirements.txt
+uvicorn app.main:app --reload
+
+# Frontend (from /frontend)
+cd frontend
+npm install
+npm run dev
+
+# Run tests
+cd backend && pytest
+cd frontend && npm test
+
+# Linting
+cd backend && ruff check . && mypy .
+cd frontend && npm run lint
+```
 
 ## Architecture
 
-*To be established* - Key architectural decisions will be documented in `.claude/tech-lead.md`.
+Self-hosted web application with separate frontend and backend services:
+
+- **Frontend**: Next.js serves the dashboard UI, communicates with backend via REST API
+- **Backend**: FastAPI handles API requests, business logic, and coordinates with external services
+- **Workers**: Celery processes background jobs (scanning, monitoring, Incogni sync)
+- **Database**: PostgreSQL stores family members, scan results, removal request status
+- **Cache/Queue**: Redis for Celery task queue and API response caching
+
+See `.claude/tech-lead.md` for detailed architecture decisions.
 
 ## Key Integrations
 
