@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -29,7 +29,7 @@ async function disconnectMicrosoft(): Promise<void> {
   if (!res.ok) throw new Error('Failed to disconnect')
 }
 
-export default function SettingsPage() {
+function SettingsContent() {
   const searchParams = useSearchParams()
   const queryClient = useQueryClient()
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
@@ -202,5 +202,13 @@ MICROSOFT_CLIENT_SECRET=your-client-secret`}
         </ol>
       </section>
     </div>
+  )
+}
+
+export default function SettingsPage() {
+  return (
+    <Suspense fallback={<div className="container mx-auto px-4 py-8">Loading...</div>}>
+      <SettingsContent />
+    </Suspense>
   )
 }
