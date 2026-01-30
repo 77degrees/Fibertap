@@ -1,26 +1,146 @@
+"""Background scanning tasks for detecting data exposures."""
+
+import asyncio
+from datetime import datetime
+
+from sqlalchemy import select, create_engine
+from sqlalchemy.orm import Session
+
 from app.tasks import celery_app
+from app.core.config import settings
+from app.models.family_member import FamilyMember
+from app.models.exposure import Exposure, ExposureSource, ExposureStatus
+from app.models.scan import Scan, ScanStatus, ScanType
+from app.services.hibp import check_email_breaches, HIBPError, format_breach_for_exposure
+
+
+# Create sync engine for Celery tasks
+sync_database_url = settings.database_url.replace("+asyncpg", "+psycopg2").replace("postgresql+psycopg2", "postgresql")
+sync_engine = create_engine(sync_database_url)
+
+
+def get_sync_db() -> Session:
+    """Get a synchronous database session for Celery tasks."""
+    return Session(sync_engine)
+
+
+@celery_app.task(bind=True, max_retries=3)
+def run_breach_scan(self, family_member_ids: list[int] | None = None, scan_id: int | None = None):
+    """
+    Scan Have I Been Pwned for breaches affecting family members.
+
+    Args:
+        family_member_ids: Optional list of member IDs to scan. If None, scans all.
+        scan_id: Optional scan record ID to update with progress.
+    """
+    with get_sync_db() as db:
+        # Get family members to scan
+        query = select(FamilyMember)
+        if family_member_ids:
+            query = query.where(FamilyMember.id.in_(family_member_ids))
+
+        members = db.execute(query).scalars().all()
+
+        if not members:
+            return {"status": "no_members", "message": "No family members to scan"}
+
+        # Update scan status if tracking
+        if scan_id:
+            scan = db.get(Scan, scan_id)
+            if scan:
+                scan.status = ScanStatus.RUNNING
+                db.commit()
+
+        total_new_exposures = 0
+        errors = []
+
+        for member in members:
+            if not member.email:
+                continue
+
+            try:
+                # Run async HIBP check in sync context
+                breaches = asyncio.run(check_email_breaches(member.email))
+
+                for breach in breaches:
+                    # Check if we already have this exposure
+                    existing = db.execute(
+                        select(Exposure).where(
+                            Exposure.family_member_id == member.id,
+                            Exposure.source == ExposureSource.BREACH,
+                            Exposure.source_name == breach.get("Title", breach.get("Name")),
+                        )
+                    ).scalar_one_or_none()
+
+                    if not existing:
+                        # Create new exposure
+                        breach_data = format_breach_for_exposure(breach, member.email)
+                        exposure = Exposure(
+                            family_member_id=member.id,
+                            source=ExposureSource.BREACH,
+                            source_name=breach_data["source_name"],
+                            source_url=breach_data["source_url"],
+                            data_exposed=breach_data["data_exposed"],
+                            status=ExposureStatus.DETECTED,
+                        )
+                        db.add(exposure)
+                        total_new_exposures += 1
+
+                db.commit()
+
+            except HIBPError as e:
+                errors.append(f"{member.name}: {str(e)}")
+                # Retry on rate limit
+                if "rate limit" in str(e).lower():
+                    raise self.retry(countdown=60 * 2)  # Retry in 2 minutes
+
+        # Update scan record
+        if scan_id:
+            scan = db.get(Scan, scan_id)
+            if scan:
+                scan.status = ScanStatus.COMPLETED if not errors else ScanStatus.FAILED
+                scan.exposures_found = total_new_exposures
+                scan.completed_at = datetime.utcnow()
+                if errors:
+                    scan.error_message = "; ".join(errors[:3])  # First 3 errors
+                db.commit()
+
+        return {
+            "status": "completed",
+            "new_exposures": total_new_exposures,
+            "members_scanned": len(members),
+            "errors": errors,
+        }
 
 
 @celery_app.task
 def run_full_scan(family_member_ids: list[int] | None = None):
-    """Run a full scan for data exposures."""
-    # TODO: Implement
-    # 1. Check HIBP for breaches
-    # 2. Check data broker sites
-    # 3. Store new exposures
-    # 4. Update scan status
-    pass
+    """Run a full scan for data exposures (breaches + data brokers)."""
+    with get_sync_db() as db:
+        # Create scan record
+        scan = Scan(
+            scan_type=ScanType.FULL,
+            status=ScanStatus.PENDING,
+        )
+        db.add(scan)
+        db.commit()
+        db.refresh(scan)
+        scan_id = scan.id
 
+    # Run breach scan
+    breach_result = run_breach_scan.delay(family_member_ids, scan_id)
 
-@celery_app.task
-def run_breach_scan(family_member_ids: list[int] | None = None):
-    """Scan Have I Been Pwned for breaches."""
-    # TODO: Implement
-    pass
+    # TODO: Run data broker scan when implemented
+    # broker_result = run_data_broker_scan.delay(family_member_ids, scan_id)
+
+    return {
+        "scan_id": scan_id,
+        "breach_task_id": breach_result.id,
+    }
 
 
 @celery_app.task
 def sync_incogni_status():
     """Sync removal request status from Incogni."""
-    # TODO: Implement
+    # TODO: Implement when Incogni integration is added
     pass
