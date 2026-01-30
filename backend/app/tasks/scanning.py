@@ -12,6 +12,7 @@ from app.models.family_member import FamilyMember
 from app.models.exposure import Exposure, ExposureSource, ExposureStatus
 from app.models.scan import Scan, ScanStatus, ScanType
 from app.services.hibp import check_email_breaches, HIBPError, format_breach_for_exposure
+from app.services.data_brokers import generate_search_urls, parse_address_for_location
 
 
 # Create sync engine for Celery tasks
@@ -114,6 +115,104 @@ def run_breach_scan(self, family_member_ids: list[int] | None = None, scan_id: i
 
 
 @celery_app.task
+def run_data_broker_scan(family_member_ids: list[int] | None = None, scan_id: int | None = None):
+    """
+    Generate search URLs for known data broker sites.
+
+    This creates exposure records with URLs to check. The user must manually
+    verify if their data appears on each site, then update the exposure status.
+
+    Args:
+        family_member_ids: Optional list of member IDs to scan. If None, scans all.
+        scan_id: Optional scan record ID to update with progress.
+    """
+    with get_sync_db() as db:
+        # Get family members to scan
+        query = select(FamilyMember)
+        if family_member_ids:
+            query = query.where(FamilyMember.id.in_(family_member_ids))
+
+        members = db.execute(query).scalars().all()
+
+        if not members:
+            return {"status": "no_members", "message": "No family members to scan"}
+
+        # Update scan status if tracking
+        if scan_id:
+            scan = db.get(Scan, scan_id)
+            if scan:
+                scan.status = ScanStatus.RUNNING
+                db.commit()
+
+        total_new_exposures = 0
+
+        for member in members:
+            # Parse name - need at least first and last name
+            name_parts = member.name.strip().split()
+            if len(name_parts) < 2:
+                continue
+
+            first_name = name_parts[0]
+            last_name = name_parts[-1]
+
+            # Try to get city/state from address
+            city, state = parse_address_for_location(member.address)
+
+            # Generate search URLs for all data broker sites
+            search_results = generate_search_urls(
+                first_name=first_name,
+                last_name=last_name,
+                city=city,
+                state=state,
+            )
+
+            for result in search_results:
+                # Check if we already have this exposure
+                existing = db.execute(
+                    select(Exposure).where(
+                        Exposure.family_member_id == member.id,
+                        Exposure.source == ExposureSource.PEOPLE_SEARCH,
+                        Exposure.source_name == result["site_name"],
+                    )
+                ).scalar_one_or_none()
+
+                if not existing:
+                    # Create new exposure record
+                    # Note: Status is DETECTED but user needs to verify manually
+                    notes = result.get("notes") or ""
+                    if result.get("opt_out_url"):
+                        notes += f" Opt-out: {result['opt_out_url']}"
+
+                    exposure = Exposure(
+                        family_member_id=member.id,
+                        source=ExposureSource.PEOPLE_SEARCH,
+                        source_name=result["site_name"],
+                        source_url=result["search_url"],
+                        data_exposed=notes.strip() if notes.strip() else "Name, address, phone (verify manually)",
+                        status=ExposureStatus.DETECTED,
+                    )
+                    db.add(exposure)
+                    total_new_exposures += 1
+
+            db.commit()
+
+        # Update scan record
+        if scan_id:
+            scan = db.get(Scan, scan_id)
+            if scan:
+                scan.status = ScanStatus.COMPLETED
+                scan.exposures_found = (scan.exposures_found or 0) + total_new_exposures
+                scan.completed_at = datetime.utcnow()
+                db.commit()
+
+        return {
+            "status": "completed",
+            "new_exposures": total_new_exposures,
+            "members_scanned": len(members),
+        }
+
+
+@celery_app.task
 def run_full_scan(family_member_ids: list[int] | None = None):
     """Run a full scan for data exposures (breaches + data brokers)."""
     with get_sync_db() as db:
@@ -127,15 +226,14 @@ def run_full_scan(family_member_ids: list[int] | None = None):
         db.refresh(scan)
         scan_id = scan.id
 
-    # Run breach scan
+    # Run both scans
     breach_result = run_breach_scan.delay(family_member_ids, scan_id)
-
-    # TODO: Run data broker scan when implemented
-    # broker_result = run_data_broker_scan.delay(family_member_ids, scan_id)
+    broker_result = run_data_broker_scan.delay(family_member_ids, scan_id)
 
     return {
         "scan_id": scan_id,
         "breach_task_id": breach_result.id,
+        "broker_task_id": broker_result.id,
     }
 
 

@@ -18,3 +18,9 @@ class ExposureResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class ExposureUpdate(BaseModel):
+    status: ExposureStatus | None = None
+    data_exposed: str | None = None
+    incogni_request_id: str | None = None

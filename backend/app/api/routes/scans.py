@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.models.scan import Scan, ScanStatus, ScanType
 from app.schemas.scan import ScanResponse, ScanCreate
-from app.tasks.scanning import run_breach_scan, run_full_scan
+from app.tasks.scanning import run_breach_scan, run_data_broker_scan, run_full_scan
 
 router = APIRouter()
 
@@ -35,15 +35,11 @@ async def trigger_scan(
     # Queue the appropriate Celery task
     if scan.scan_type == ScanType.BREACH:
         run_breach_scan.delay(scan.family_member_ids, db_scan.id)
+    elif scan.scan_type == ScanType.DATA_BROKER:
+        run_data_broker_scan.delay(scan.family_member_ids, db_scan.id)
     elif scan.scan_type == ScanType.FULL:
         run_breach_scan.delay(scan.family_member_ids, db_scan.id)
-        # TODO: Also trigger data broker scan when implemented
-    else:
-        # DATA_BROKER type - not yet implemented
-        db_scan.status = ScanStatus.FAILED
-        db_scan.error_message = "Data broker scanning not yet implemented"
-        await db.commit()
-        await db.refresh(db_scan)
+        run_data_broker_scan.delay(scan.family_member_ids, db_scan.id)
 
     return db_scan
 
