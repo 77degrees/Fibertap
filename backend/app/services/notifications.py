@@ -18,15 +18,43 @@ class NotificationError(Exception):
     pass
 
 
+def _get_smtp_settings() -> dict | None:
+    """Get SMTP settings from database or config."""
+    try:
+        from app.models.app_settings import AppSettings
+        from app.core.database import sync_engine
+
+        with Session(sync_engine) as db:
+            result = db.execute(select(AppSettings))
+            settings_dict = {s.key: s.value for s in result.scalars().all()}
+
+            if settings_dict.get("smtp_user") and settings_dict.get("smtp_password"):
+                return {
+                    "host": settings_dict.get("smtp_host", "smtp.gmail.com"),
+                    "port": int(settings_dict.get("smtp_port", "587")),
+                    "user": settings_dict["smtp_user"],
+                    "password": settings_dict["smtp_password"],
+                    "notification_email": settings_dict.get("notification_email", settings_dict["smtp_user"]),
+                }
+    except Exception:
+        pass
+
+    # Fall back to config settings
+    if all([settings.smtp_host, settings.smtp_user, settings.smtp_password]):
+        return {
+            "host": settings.smtp_host,
+            "port": settings.smtp_port,
+            "user": settings.smtp_user,
+            "password": settings.smtp_password,
+            "notification_email": settings.notification_email or settings.smtp_from_email,
+        }
+
+    return None
+
+
 def is_smtp_configured() -> bool:
     """Check if SMTP email is configured."""
-    return all([
-        settings.smtp_host,
-        settings.smtp_user,
-        settings.smtp_password,
-        settings.smtp_from_email,
-        settings.notification_email,
-    ])
+    return _get_smtp_settings() is not None
 
 
 def is_email_configured() -> bool:
@@ -119,13 +147,14 @@ def send_email(subject: str, body_text: str, body_html: str | None = None) -> bo
             raise NotificationError(f"Failed to send via Microsoft: {e}")
 
     # Fall back to SMTP
-    if not is_smtp_configured():
+    smtp_settings = _get_smtp_settings()
+    if not smtp_settings:
         return False
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"] = settings.smtp_from_email
-    msg["To"] = settings.notification_email
+    msg["From"] = smtp_settings["user"]
+    msg["To"] = smtp_settings["notification_email"]
 
     # Attach text version
     msg.attach(MIMEText(body_text, "plain"))
@@ -135,12 +164,12 @@ def send_email(subject: str, body_text: str, body_html: str | None = None) -> bo
         msg.attach(MIMEText(body_html, "html"))
 
     try:
-        with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as server:
+        with smtplib.SMTP(smtp_settings["host"], smtp_settings["port"]) as server:
             server.starttls()
-            server.login(settings.smtp_user, settings.smtp_password)
+            server.login(smtp_settings["user"], smtp_settings["password"])
             server.sendmail(
-                settings.smtp_from_email,
-                settings.notification_email,
+                smtp_settings["user"],
+                smtp_settings["notification_email"],
                 msg.as_string(),
             )
         return True

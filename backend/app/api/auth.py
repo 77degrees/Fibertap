@@ -1,12 +1,14 @@
-"""OAuth authentication endpoints."""
+"""OAuth authentication and email settings endpoints."""
 
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 
 from app.core.database import async_session_maker
 from app.models.oauth_token import OAuthToken
+from app.models.app_settings import AppSettings
 from app.services.microsoft_oauth import (
     get_authorization_url,
     exchange_code_for_tokens,
@@ -17,6 +19,37 @@ from app.services.microsoft_oauth import (
 from app.core.config import settings
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+class SmtpSettings(BaseModel):
+    """SMTP configuration for email notifications."""
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_user: str  # Gmail address
+    smtp_password: str  # App password
+    notification_email: str  # Where to send alerts
+
+
+async def get_setting(db, key: str) -> str | None:
+    """Get a setting value from database."""
+    result = await db.execute(
+        select(AppSettings).where(AppSettings.key == key)
+    )
+    setting = result.scalar_one_or_none()
+    return setting.value if setting else None
+
+
+async def set_setting(db, key: str, value: str) -> None:
+    """Set a setting value in database."""
+    result = await db.execute(
+        select(AppSettings).where(AppSettings.key == key)
+    )
+    setting = result.scalar_one_or_none()
+    if setting:
+        setting.value = value
+    else:
+        setting = AppSettings(key=key, value=value)
+        db.add(setting)
 
 
 @router.get("/microsoft/connect")
@@ -124,14 +157,83 @@ async def auth_status():
                 "expires_at": microsoft_token.expires_at.isoformat() if microsoft_token.expires_at else None,
             }
 
+        # Check for SMTP settings in database
+        smtp_user = await get_setting(db, "smtp_user")
+        smtp_password = await get_setting(db, "smtp_password")
+        notification_email = await get_setting(db, "notification_email")
+
+        smtp_configured = bool(smtp_user and smtp_password)
+
         return {
             "microsoft": microsoft_status,
-            "smtp_configured": all([
-                settings.smtp_host,
-                settings.smtp_user,
-                settings.smtp_password,
-            ]),
+            "smtp_configured": smtp_configured,
+            "smtp_email": smtp_user if smtp_configured else None,
+            "notification_email": notification_email if smtp_configured else None,
         }
+
+
+@router.post("/smtp/configure")
+async def configure_smtp(smtp_settings: SmtpSettings):
+    """
+    Configure SMTP settings for email notifications.
+
+    For Gmail, use an App Password (not your regular password).
+    """
+    async with async_session_maker() as db:
+        await set_setting(db, "smtp_host", smtp_settings.smtp_host)
+        await set_setting(db, "smtp_port", str(smtp_settings.smtp_port))
+        await set_setting(db, "smtp_user", smtp_settings.smtp_user)
+        await set_setting(db, "smtp_password", smtp_settings.smtp_password)
+        await set_setting(db, "notification_email", smtp_settings.notification_email)
+        await db.commit()
+
+    return {
+        "status": "configured",
+        "smtp_email": smtp_settings.smtp_user,
+        "notification_email": smtp_settings.notification_email,
+    }
+
+
+@router.post("/smtp/test")
+async def test_smtp():
+    """Send a test email to verify SMTP configuration."""
+    from app.services.notifications import send_email, NotificationError
+
+    try:
+        result = send_email(
+            subject="[Fibertap] Test Email",
+            body_text="This is a test email from Fibertap. If you received this, your email notifications are working!",
+            body_html="""
+            <html>
+            <body style="font-family: Arial, sans-serif;">
+                <h2>Fibertap Test Email</h2>
+                <p>If you received this, your email notifications are working!</p>
+            </body>
+            </html>
+            """,
+        )
+        if result:
+            return {"status": "success", "message": "Test email sent!"}
+        else:
+            return {"status": "not_configured", "message": "Email is not configured"}
+    except NotificationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/smtp/disconnect")
+async def disconnect_smtp():
+    """Remove SMTP configuration."""
+    async with async_session_maker() as db:
+        for key in ["smtp_host", "smtp_port", "smtp_user", "smtp_password", "notification_email"]:
+            result = await db.execute(
+                select(AppSettings).where(AppSettings.key == key)
+            )
+            setting = result.scalar_one_or_none()
+            if setting:
+                await db.delete(setting)
+        await db.commit()
+
+    return {"status": "disconnected"}
 
 
 @router.delete("/microsoft/disconnect")
