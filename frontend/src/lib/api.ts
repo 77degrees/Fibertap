@@ -13,6 +13,11 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> 
     throw new Error(`API error: ${res.status}`)
   }
 
+  // Handle 204 No Content
+  if (res.status === 204) {
+    return null as T
+  }
+
   return res.json()
 }
 
@@ -30,40 +35,66 @@ export interface FamilyMember {
 export interface Exposure {
   id: number
   family_member_id: number
-  source: string
+  source: 'breach' | 'people_search' | 'data_broker' | 'other'
   source_name: string
   source_url: string | null
   data_exposed: string | null
-  status: string
+  status: 'detected' | 'removal_requested' | 'removal_in_progress' | 'removed' | 'removal_failed'
   incogni_request_id: string | null
   detected_at: string
   updated_at: string
 }
 
+export interface Scan {
+  id: number
+  scan_type: 'full' | 'breach' | 'data_broker'
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  exposures_found: number
+  error_message: string | null
+  started_at: string
+  completed_at: string | null
+}
+
 export const api = {
   familyMembers: {
-    list: () => fetchApi<FamilyMember[]>('/family-members'),
+    list: () => fetchApi<FamilyMember[]>('/family-members/'),
     get: (id: number) => fetchApi<FamilyMember>(`/family-members/${id}`),
     create: (data: Partial<FamilyMember>) =>
-      fetchApi<FamilyMember>('/family-members', {
+      fetchApi<FamilyMember>('/family-members/', {
         method: 'POST',
         body: JSON.stringify(data),
       }),
+    update: (id: number, data: Partial<FamilyMember>) =>
+      fetchApi<FamilyMember>(`/family-members/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
     delete: (id: number) =>
-      fetchApi(`/family-members/${id}`, { method: 'DELETE' }),
+      fetchApi<null>(`/family-members/${id}`, { method: 'DELETE' }),
   },
   exposures: {
-    list: (memberId?: number) =>
-      fetchApi<Exposure[]>(`/exposures${memberId ? `?member_id=${memberId}` : ''}`),
+    list: (memberId?: number, status?: string) => {
+      const params = new URLSearchParams()
+      if (memberId) params.append('member_id', memberId.toString())
+      if (status) params.append('status', status)
+      const query = params.toString()
+      return fetchApi<Exposure[]>(`/exposures/${query ? `?${query}` : ''}`)
+    },
     get: (id: number) => fetchApi<Exposure>(`/exposures/${id}`),
     requestRemoval: (id: number) =>
-      fetchApi(`/exposures/${id}/request-removal`, { method: 'POST' }),
+      fetchApi<Exposure>(`/exposures/${id}/request-removal`, { method: 'POST' }),
+    markRemoved: (id: number) =>
+      fetchApi<Exposure>(`/exposures/${id}/mark-removed`, { method: 'POST' }),
+    delete: (id: number) =>
+      fetchApi<null>(`/exposures/${id}`, { method: 'DELETE' }),
   },
   scans: {
-    trigger: (scanType = 'full') =>
-      fetchApi('/scans', {
+    list: () => fetchApi<Scan[]>('/scans/'),
+    get: (id: number) => fetchApi<Scan>(`/scans/${id}`),
+    trigger: (scanType: 'full' | 'breach' | 'data_broker' = 'full', familyMemberIds?: number[]) =>
+      fetchApi<Scan>('/scans/', {
         method: 'POST',
-        body: JSON.stringify({ scan_type: scanType }),
+        body: JSON.stringify({ scan_type: scanType, family_member_ids: familyMemberIds }),
       }),
   },
 }
