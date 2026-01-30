@@ -4,6 +4,7 @@ import { useState } from 'react'
 import Link from 'next/link'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api, FamilyMember, FamilyMemberCreate, Exposure } from '@/lib/api'
+import { AddressAutocomplete } from './address-autocomplete'
 
 const emptyMember: FamilyMemberCreate = {
   first_name: '',
@@ -332,11 +333,10 @@ export function Dashboard() {
               <div className="space-y-2">
                 {newMember.addresses?.map((address, idx) => (
                   <div key={idx} className="flex gap-2">
-                    <input
-                      type="text"
-                      placeholder="123 Main St, City, State ZIP"
+                    <AddressAutocomplete
                       value={address}
-                      onChange={e => updateArrayField('addresses', idx, e.target.value)}
+                      onChange={(value) => updateArrayField('addresses', idx, value)}
+                      placeholder="Start typing an address..."
                       className="flex-1 rounded border p-2"
                     />
                     {(newMember.addresses?.length || 0) > 1 && (
