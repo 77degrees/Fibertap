@@ -1,0 +1,103 @@
+services:
+  traefik:
+    image: traefik:v3.0
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "80:80"
+      - "8080:8080"  # Traefik dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - fibertap
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: fibertap
+      POSTGRES_PASSWORD: fibertap
+      POSTGRES_DB: fibertap
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - fibertap
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fibertap"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    networks:
+      - fibertap
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://fibertap:fibertap@db:5432/fibertap
+      REDIS_URL: redis://redis:6379/0
+      CORS_ORIGINS: '["http://localhost", "http://localhost:3000"]'
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.backend.rule=PathPrefix(`/api`) || PathPrefix(`/health`)"
+      - "traefik.http.routers.backend.entrypoints=web"
+      - "traefik.http.services.backend.loadbalancer.server.port=8000"
+    networks:
+      - fibertap
+
+  celery:
+    build:
+      context: .
+      dockerfile: docker/celery.Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://fibertap:fibertap@db:5432/fibertap
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - fibertap
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost/api
+    depends_on:
+      - backend
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.frontend.entrypoints=web"
+      - "traefik.http.services.frontend.loadbalancer.server.port=3000"
+    networks:
+      - fibertap
+
+networks:
+  fibertap:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
