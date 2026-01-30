@@ -23,13 +23,18 @@ class Settings(BaseSettings):
     incogni_api_key: str | None = None
     hibp_api_key: str | None = None
 
-    # Email notifications
+    # Email notifications (legacy SMTP - deprecated in favor of OAuth)
     smtp_host: str | None = None
     smtp_port: int = 587
     smtp_user: str | None = None
     smtp_password: str | None = None
     smtp_from_email: str | None = None
     notification_email: str | None = None  # Where to send alerts
+
+    # Microsoft OAuth (for Outlook email)
+    microsoft_client_id: str | None = None
+    microsoft_client_secret: str | None = None
+    microsoft_redirect_uri: str = "http://localhost:8000/api/auth/microsoft/callback"
 
     class Config:
         env_file = ".env"

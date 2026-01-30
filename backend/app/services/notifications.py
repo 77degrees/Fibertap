@@ -1,9 +1,14 @@
 """Email notification service for alerting on new exposures."""
 
 import smtplib
+import asyncio
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from datetime import datetime
 from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
 
@@ -13,8 +18,8 @@ class NotificationError(Exception):
     pass
 
 
-def is_email_configured() -> bool:
-    """Check if email notifications are configured."""
+def is_smtp_configured() -> bool:
+    """Check if SMTP email is configured."""
     return all([
         settings.smtp_host,
         settings.smtp_user,
@@ -24,14 +29,97 @@ def is_email_configured() -> bool:
     ])
 
 
+def is_email_configured() -> bool:
+    """Check if any email method is configured (OAuth or SMTP)."""
+    # Check for Microsoft OAuth token
+    if _has_valid_microsoft_token():
+        return True
+    # Fall back to SMTP
+    return is_smtp_configured()
+
+
+def _has_valid_microsoft_token() -> bool:
+    """Check if we have a valid Microsoft OAuth token."""
+    try:
+        from app.models.oauth_token import OAuthToken
+        from app.core.database import sync_engine
+
+        with Session(sync_engine) as db:
+            result = db.execute(
+                select(OAuthToken).where(OAuthToken.provider == "microsoft")
+            )
+            token = result.scalar_one_or_none()
+            if token and token.refresh_token:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _get_microsoft_token() -> tuple[str, str] | None:
+    """Get Microsoft OAuth token, refreshing if needed."""
+    try:
+        from app.models.oauth_token import OAuthToken
+        from app.core.database import sync_engine
+        from app.services.microsoft_oauth import refresh_access_token, calculate_expiry
+
+        with Session(sync_engine) as db:
+            result = db.execute(
+                select(OAuthToken).where(OAuthToken.provider == "microsoft")
+            )
+            token = result.scalar_one_or_none()
+
+            if not token:
+                return None
+
+            # Check if token needs refresh
+            if token.expires_at and token.expires_at < datetime.utcnow():
+                if not token.refresh_token:
+                    return None
+
+                # Refresh the token
+                new_tokens = asyncio.run(refresh_access_token(token.refresh_token))
+                token.access_token = new_tokens["access_token"]
+                if new_tokens.get("refresh_token"):
+                    token.refresh_token = new_tokens["refresh_token"]
+                token.expires_at = calculate_expiry(new_tokens.get("expires_in", 3600))
+                db.commit()
+
+            return token.access_token, token.email
+    except Exception:
+        pass
+    return None
+
+
 def send_email(subject: str, body_text: str, body_html: str | None = None) -> bool:
     """
     Send an email notification.
 
+    Tries Microsoft Graph API first, falls back to SMTP.
     Returns True if sent successfully, False if not configured.
     Raises NotificationError on failure.
     """
-    if not is_email_configured():
+    # Try Microsoft OAuth first
+    ms_token = _get_microsoft_token()
+    if ms_token:
+        access_token, from_email = ms_token
+        to_email = settings.notification_email or from_email
+
+        try:
+            from app.services.microsoft_oauth import send_email as ms_send_email
+            asyncio.run(ms_send_email(
+                access_token=access_token,
+                to_email=to_email,
+                subject=subject,
+                body_text=body_text,
+                body_html=body_html,
+            ))
+            return True
+        except Exception as e:
+            raise NotificationError(f"Failed to send via Microsoft: {e}")
+
+    # Fall back to SMTP
+    if not is_smtp_configured():
         return False
 
     msg = MIMEMultipart("alternative")
