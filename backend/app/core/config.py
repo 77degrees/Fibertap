@@ -23,6 +23,14 @@ class Settings(BaseSettings):
     incogni_api_key: str | None = None
     hibp_api_key: str | None = None
 
+    # Email notifications
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    smtp_from_email: str | None = None
+    notification_email: str | None = None  # Where to send alerts
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

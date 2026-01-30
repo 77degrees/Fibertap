@@ -13,6 +13,7 @@ from app.models.exposure import Exposure, ExposureSource, ExposureStatus
 from app.models.scan import Scan, ScanStatus, ScanType
 from app.services.hibp import check_email_breaches, HIBPError, format_breach_for_exposure
 from app.services.data_brokers import generate_search_urls, parse_address_for_location
+from app.services.notifications import send_new_exposures_alert, send_scan_complete_alert
 
 
 # Create sync engine for Celery tasks
@@ -59,6 +60,8 @@ def run_breach_scan(self, family_member_ids: list[int] | None = None, scan_id: i
             if not member.email:
                 continue
 
+            member_new_exposures = []  # Track new exposures for this member
+
             try:
                 # Run async HIBP check in sync context
                 breaches = asyncio.run(check_email_breaches(member.email))
@@ -86,8 +89,16 @@ def run_breach_scan(self, family_member_ids: list[int] | None = None, scan_id: i
                         )
                         db.add(exposure)
                         total_new_exposures += 1
+                        member_new_exposures.append(breach_data)
 
                 db.commit()
+
+                # Send alert if new exposures found for this member
+                if member_new_exposures:
+                    try:
+                        send_new_exposures_alert(member_new_exposures, member.name, "breach")
+                    except Exception:
+                        pass  # Don't fail scan if notification fails
 
             except HIBPError as e:
                 errors.append(f"{member.name}: {str(e)}")
@@ -105,6 +116,18 @@ def run_breach_scan(self, family_member_ids: list[int] | None = None, scan_id: i
                 if errors:
                     scan.error_message = "; ".join(errors[:3])  # First 3 errors
                 db.commit()
+
+        # Send scan completion alert
+        if total_new_exposures > 0 or errors:
+            try:
+                send_scan_complete_alert(
+                    scan_type="breach",
+                    total_members=len(members),
+                    new_exposures=total_new_exposures,
+                    errors=errors if errors else None,
+                )
+            except Exception:
+                pass  # Don't fail if notification fails
 
         return {
             "status": "completed",
@@ -166,6 +189,8 @@ def run_data_broker_scan(family_member_ids: list[int] | None = None, scan_id: in
                 state=state,
             )
 
+            member_new_exposures = []  # Track new exposures for this member
+
             for result in search_results:
                 # Check if we already have this exposure
                 existing = db.execute(
@@ -183,18 +208,32 @@ def run_data_broker_scan(family_member_ids: list[int] | None = None, scan_id: in
                     if result.get("opt_out_url"):
                         notes += f" Opt-out: {result['opt_out_url']}"
 
+                    data_exposed = notes.strip() if notes.strip() else "Name, address, phone (verify manually)"
+
                     exposure = Exposure(
                         family_member_id=member.id,
                         source=ExposureSource.PEOPLE_SEARCH,
                         source_name=result["site_name"],
                         source_url=result["search_url"],
-                        data_exposed=notes.strip() if notes.strip() else "Name, address, phone (verify manually)",
+                        data_exposed=data_exposed,
                         status=ExposureStatus.DETECTED,
                     )
                     db.add(exposure)
                     total_new_exposures += 1
+                    member_new_exposures.append({
+                        "source_name": result["site_name"],
+                        "source_url": result["search_url"],
+                        "data_exposed": data_exposed,
+                    })
 
             db.commit()
+
+            # Send alert if new exposures found for this member
+            if member_new_exposures:
+                try:
+                    send_new_exposures_alert(member_new_exposures, member.name, "data broker")
+                except Exception:
+                    pass  # Don't fail scan if notification fails
 
         # Update scan record
         if scan_id:
@@ -204,6 +243,17 @@ def run_data_broker_scan(family_member_ids: list[int] | None = None, scan_id: in
                 scan.exposures_found = (scan.exposures_found or 0) + total_new_exposures
                 scan.completed_at = datetime.utcnow()
                 db.commit()
+
+        # Send scan completion alert
+        if total_new_exposures > 0:
+            try:
+                send_scan_complete_alert(
+                    scan_type="data broker",
+                    total_members=len(members),
+                    new_exposures=total_new_exposures,
+                )
+            except Exception:
+                pass  # Don't fail if notification fails
 
         return {
             "status": "completed",
