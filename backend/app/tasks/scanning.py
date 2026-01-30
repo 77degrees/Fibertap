@@ -242,3 +242,45 @@ def sync_incogni_status():
     """Sync removal request status from Incogni."""
     # TODO: Implement when Incogni integration is added
     pass
+
+
+# Scheduled task wrappers for Celery Beat
+@celery_app.task
+def scheduled_full_scan():
+    """Scheduled full scan - runs daily via Celery Beat."""
+    with get_sync_db() as db:
+        # Create scan record
+        scan = Scan(
+            scan_type=ScanType.FULL,
+            status=ScanStatus.PENDING,
+        )
+        db.add(scan)
+        db.commit()
+        db.refresh(scan)
+        scan_id = scan.id
+
+    # Run both scans
+    run_breach_scan.delay(None, scan_id)
+    run_data_broker_scan.delay(None, scan_id)
+
+    return {"scan_id": scan_id, "scheduled": True}
+
+
+@celery_app.task
+def scheduled_breach_scan():
+    """Scheduled breach scan - runs every 6 hours via Celery Beat."""
+    with get_sync_db() as db:
+        # Create scan record
+        scan = Scan(
+            scan_type=ScanType.BREACH,
+            status=ScanStatus.PENDING,
+        )
+        db.add(scan)
+        db.commit()
+        db.refresh(scan)
+        scan_id = scan.id
+
+    # Run breach scan only
+    run_breach_scan.delay(None, scan_id)
+
+    return {"scan_id": scan_id, "scheduled": True}
