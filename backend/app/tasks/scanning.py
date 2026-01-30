@@ -57,54 +57,62 @@ def run_breach_scan(self, family_member_ids: list[int] | None = None, scan_id: i
         errors = []
 
         for member in members:
-            if not member.email:
+            # Get all emails to check (new array field + legacy single field)
+            emails_to_check = []
+            if member.emails:
+                emails_to_check.extend(member.emails)
+            if member.email and member.email not in emails_to_check:
+                emails_to_check.append(member.email)
+
+            if not emails_to_check:
                 continue
 
             member_new_exposures = []  # Track new exposures for this member
 
-            try:
-                # Run async HIBP check in sync context
-                breaches = asyncio.run(check_email_breaches(member.email))
+            for email in emails_to_check:
+                try:
+                    # Run async HIBP check in sync context
+                    breaches = asyncio.run(check_email_breaches(email))
 
-                for breach in breaches:
-                    # Check if we already have this exposure
-                    existing = db.execute(
-                        select(Exposure).where(
-                            Exposure.family_member_id == member.id,
-                            Exposure.source == ExposureSource.BREACH,
-                            Exposure.source_name == breach.get("Title", breach.get("Name")),
-                        )
-                    ).scalar_one_or_none()
+                    for breach in breaches:
+                        # Check if we already have this exposure
+                        existing = db.execute(
+                            select(Exposure).where(
+                                Exposure.family_member_id == member.id,
+                                Exposure.source == ExposureSource.BREACH,
+                                Exposure.source_name == breach.get("Title", breach.get("Name")),
+                            )
+                        ).scalar_one_or_none()
 
-                    if not existing:
-                        # Create new exposure
-                        breach_data = format_breach_for_exposure(breach, member.email)
-                        exposure = Exposure(
-                            family_member_id=member.id,
-                            source=ExposureSource.BREACH,
-                            source_name=breach_data["source_name"],
-                            source_url=breach_data["source_url"],
-                            data_exposed=breach_data["data_exposed"],
-                            status=ExposureStatus.DETECTED,
-                        )
-                        db.add(exposure)
-                        total_new_exposures += 1
-                        member_new_exposures.append(breach_data)
+                        if not existing:
+                            # Create new exposure
+                            breach_data = format_breach_for_exposure(breach, email)
+                            exposure = Exposure(
+                                family_member_id=member.id,
+                                source=ExposureSource.BREACH,
+                                source_name=breach_data["source_name"],
+                                source_url=breach_data["source_url"],
+                                data_exposed=breach_data["data_exposed"],
+                                status=ExposureStatus.DETECTED,
+                            )
+                            db.add(exposure)
+                            total_new_exposures += 1
+                            member_new_exposures.append(breach_data)
 
-                db.commit()
+                    db.commit()
 
-                # Send alert if new exposures found for this member
-                if member_new_exposures:
-                    try:
-                        send_new_exposures_alert(member_new_exposures, member.name, "breach")
-                    except Exception:
-                        pass  # Don't fail scan if notification fails
+                except HIBPError as e:
+                    errors.append(f"{member.name} ({email}): {str(e)}")
+                    # Retry on rate limit
+                    if "rate limit" in str(e).lower():
+                        raise self.retry(countdown=60 * 2)  # Retry in 2 minutes
 
-            except HIBPError as e:
-                errors.append(f"{member.name}: {str(e)}")
-                # Retry on rate limit
-                if "rate limit" in str(e).lower():
-                    raise self.retry(countdown=60 * 2)  # Retry in 2 minutes
+            # Send alert if new exposures found for this member
+            if member_new_exposures:
+                try:
+                    send_new_exposures_alert(member_new_exposures, member.name, "breach")
+                except Exception:
+                    pass  # Don't fail scan if notification fails
 
         # Update scan record
         if scan_id:
@@ -170,61 +178,87 @@ def run_data_broker_scan(family_member_ids: list[int] | None = None, scan_id: in
         total_new_exposures = 0
 
         for member in members:
-            # Parse name - need at least first and last name
-            name_parts = member.name.strip().split()
-            if len(name_parts) < 2:
-                continue
+            # Use new name fields, fall back to parsing legacy name
+            if member.first_name and member.last_name:
+                first_name = member.first_name
+                last_name = member.last_name
+                middle_initial = member.middle_initial
+            else:
+                # Parse legacy name field
+                name_parts = member.name.strip().split()
+                if len(name_parts) < 2:
+                    continue
+                first_name = name_parts[0]
+                last_name = name_parts[-1]
+                middle_initial = None
 
-            first_name = name_parts[0]
-            last_name = name_parts[-1]
+            # Build list of name variations to search
+            name_variations = [
+                (first_name, last_name),  # Basic: "John Smith"
+            ]
+            if middle_initial:
+                # Add variation with middle initial: "John M Smith"
+                name_variations.append((f"{first_name} {middle_initial}", last_name))
 
-            # Try to get city/state from address
-            city, state = parse_address_for_location(member.address)
+            # Get all addresses to use for location
+            addresses_to_check = []
+            if member.addresses:
+                addresses_to_check.extend(member.addresses)
+            if member.address and member.address not in addresses_to_check:
+                addresses_to_check.append(member.address)
 
-            # Generate search URLs for all data broker sites
-            search_results = generate_search_urls(
-                first_name=first_name,
-                last_name=last_name,
-                city=city,
-                state=state,
-            )
+            # If no addresses, still search with just name
+            if not addresses_to_check:
+                addresses_to_check = [None]
 
             member_new_exposures = []  # Track new exposures for this member
 
-            for result in search_results:
-                # Check if we already have this exposure
-                existing = db.execute(
-                    select(Exposure).where(
-                        Exposure.family_member_id == member.id,
-                        Exposure.source == ExposureSource.PEOPLE_SEARCH,
-                        Exposure.source_name == result["site_name"],
+            # Search for each name variation with each address
+            for fname, lname in name_variations:
+                for addr in addresses_to_check:
+                    city, state = parse_address_for_location(addr) if addr else (None, None)
+
+                    # Generate search URLs for all data broker sites
+                    search_results = generate_search_urls(
+                        first_name=fname,
+                        last_name=lname,
+                        city=city,
+                        state=state,
                     )
-                ).scalar_one_or_none()
 
-                if not existing:
-                    # Create new exposure record
-                    # Note: Status is DETECTED but user needs to verify manually
-                    notes = result.get("notes") or ""
-                    if result.get("opt_out_url"):
-                        notes += f" Opt-out: {result['opt_out_url']}"
+                    for result in search_results:
+                        # Check if we already have this exposure (by site name only)
+                        existing = db.execute(
+                            select(Exposure).where(
+                                Exposure.family_member_id == member.id,
+                                Exposure.source == ExposureSource.PEOPLE_SEARCH,
+                                Exposure.source_name == result["site_name"],
+                            )
+                        ).scalar_one_or_none()
 
-                    data_exposed = notes.strip() if notes.strip() else "Name, address, phone (verify manually)"
+                        if not existing:
+                            # Create new exposure record
+                            notes = result.get("notes") or ""
+                            if result.get("opt_out_url"):
+                                notes += f" Opt-out: {result['opt_out_url']}"
 
-                    exposure = Exposure(
-                        family_member_id=member.id,
-                        source=ExposureSource.PEOPLE_SEARCH,
-                        source_name=result["site_name"],
-                        source_url=result["search_url"],
-                        data_exposed=data_exposed,
-                        status=ExposureStatus.DETECTED,
-                    )
-                    db.add(exposure)
-                    total_new_exposures += 1
-                    member_new_exposures.append({
-                        "source_name": result["site_name"],
-                        "source_url": result["search_url"],
-                        "data_exposed": data_exposed,
-                    })
+                            data_exposed = notes.strip() if notes.strip() else "Name, address, phone (verify manually)"
+
+                            exposure = Exposure(
+                                family_member_id=member.id,
+                                source=ExposureSource.PEOPLE_SEARCH,
+                                source_name=result["site_name"],
+                                source_url=result["search_url"],
+                                data_exposed=data_exposed,
+                                status=ExposureStatus.DETECTED,
+                            )
+                            db.add(exposure)
+                            total_new_exposures += 1
+                            member_new_exposures.append({
+                                "source_name": result["site_name"],
+                                "source_url": result["search_url"],
+                                "data_exposed": data_exposed,
+                            })
 
             db.commit()
 

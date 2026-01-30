@@ -26,7 +26,10 @@ async def create_family_member(
     db: AsyncSession = Depends(get_db),
 ):
     """Add a new family member to monitor."""
-    db_member = FamilyMember(**member.model_dump())
+    data = member.model_dump()
+    # Set legacy name field from first + last name
+    data["name"] = f"{data['first_name']} {data['last_name']}"
+    db_member = FamilyMember(**data)
     db.add(db_member)
     await db.commit()
     await db.refresh(db_member)
@@ -58,6 +61,10 @@ async def update_family_member(
     update_data = member_update.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(member, field, value)
+
+    # Update legacy name field if first/last name changed
+    if "first_name" in update_data or "last_name" in update_data:
+        member.name = f"{member.first_name} {member.last_name}"
 
     await db.commit()
     await db.refresh(member)

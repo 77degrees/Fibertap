@@ -23,13 +23,26 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> 
 
 export interface FamilyMember {
   id: number
-  name: string
-  email: string | null
-  phone: string | null
-  address: string | null
+  first_name: string
+  middle_initial: string | null
+  last_name: string
+  name: string  // Legacy computed field
+  emails: string[]
+  phone_numbers: string[]
+  addresses: string[]
   date_of_birth: string | null
   created_at: string
   updated_at: string
+}
+
+export interface FamilyMemberCreate {
+  first_name: string
+  middle_initial?: string
+  last_name: string
+  emails?: string[]
+  phone_numbers?: string[]
+  addresses?: string[]
+  date_of_birth?: string
 }
 
 export interface Exposure {
@@ -59,7 +72,7 @@ export const api = {
   familyMembers: {
     list: () => fetchApi<FamilyMember[]>('/family-members/'),
     get: (id: number) => fetchApi<FamilyMember>(`/family-members/${id}`),
-    create: (data: Partial<FamilyMember>) =>
+    create: (data: FamilyMemberCreate) =>
       fetchApi<FamilyMember>('/family-members/', {
         method: 'POST',
         body: JSON.stringify(data),
